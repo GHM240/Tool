@@ -239,7 +239,7 @@ EPAPER_PRESETS = {
             ("YELLOW", 2, "#FFD800"),
             ("RED", 3, "#DC0000"),
         ],
-        "note": "适合 2.13G 四色屏横向素材。输出 .epd 大小为 7625 bytes。",
+        "note": "横向预览用。注意：当前 2.13G V2 驱动通常按 122x250、7750 bytes 读取；如要给当前驱动使用，建议选择 122x250 竖向预设并用旋转处理。",
     },
     "Waveshare 2.13inch (G) 122x250 四色 竖向": {
         "w": 122,
@@ -252,7 +252,7 @@ EPAPER_PRESETS = {
             ("YELLOW", 2, "#FFD800"),
             ("RED", 3, "#DC0000"),
         ],
-        "note": "适合 2.13G 四色屏竖向素材。输出 .epd 大小为 7625 bytes。",
+        "note": "适合当前 2.13G V2 驱动。输出 .epd 大小应为 7750 bytes：每行 ceil(122/4)=31 字节，250 行，末尾补白。",
     },
     "自定义四色 2-bit 160x296": {
         "w": 160,
@@ -277,7 +277,28 @@ def hx2rgb(s: str):
 
 
 def output_size(w: int, h: int, bpp: int) -> int:
-    return (w * h * bpp + 7) // 8
+    """
+    按“逐行打包”计算输出大小。
+
+    关键点：
+    墨水屏驱动通常是一行一行发送数据，而不是把整张图连续打包。
+    所以当宽度不能被每字节像素数整除时，每一行末尾都要补齐到 1 字节。
+
+    例如 2.13G V2：
+        122 像素宽，2bpp，4 像素/字节
+        每行 ceil(122 / 4) = 31 字节
+        31 * 250 = 7750 bytes
+
+    旧算法 (w*h*bpp+7)//8 会得到 7625 bytes，这是错误的连续打包大小。
+    """
+    if bpp not in (1, 2, 4, 8):
+        raise ValueError("bpp 只支持 1/2/4/8")
+
+    if bpp == 8:
+        return w * h
+
+    row_bytes = (w * bpp + 7) // 8
+    return row_bytes * h
 
 
 def weighted_distance(a, b):
@@ -361,23 +382,47 @@ def image_to_codes(img, palette_rgb, palette_values):
     return codes
 
 
-def pack_codes(codes, bpp: int, order: str) -> bytes:
+def pack_codes(codes, w: int, h: int, bpp: int, order: str, pad_value: int = 0) -> bytes:
+    """
+    逐行打包像素码。
+
+    不能把整张图片直接连续打包，否则 122x250 / 2bpp 会得到 7625 bytes。
+    正确做法是每一行单独打包，每行最后不足 1 字节的像素用 pad_value 补齐。
+
+    对 2.13G V2：
+        每 4 个像素 1 字节
+        122 像素 = 30.5 字节
+        每行必须补齐成 31 字节
+        31 * 250 = 7750 bytes
+    """
     if bpp not in (1, 2, 4, 8):
         raise ValueError("bpp 只支持 1/2/4/8")
+
+    if len(codes) != w * h:
+        raise ValueError(f"像素数量错误：{len(codes)}，期望 {w * h}")
+
     if bpp == 8:
         return bytes([c & 0xFF for c in codes])
 
     per_byte = 8 // bpp
     mask = (1 << bpp) - 1
     out = bytearray()
-    for i in range(0, len(codes), per_byte):
-        group = codes[i:i + per_byte]
-        group += [0] * (per_byte - len(group))
-        b = 0
-        for j, c in enumerate(group):
-            shift = j * bpp if order == "低位优先" else 8 - bpp * (j + 1)
-            b |= (c & mask) << shift
-        out.append(b)
+
+    for y in range(h):
+        row = codes[y * w:(y + 1) * w]
+
+        for x in range(0, w, per_byte):
+            group = row[x:x + per_byte]
+
+            # 行尾不足 1 字节时补白。当前四色屏 WHITE 的值通常是 1。
+            group += [pad_value] * (per_byte - len(group))
+
+            b = 0
+            for j, c in enumerate(group):
+                shift = j * bpp if order == "低位优先" else 8 - bpp * (j + 1)
+                b |= (c & mask) << shift
+            out.append(b)
+
     return bytes(out)
 
 
@@ -1251,7 +1296,19 @@ class DisplayConverterApp:
     def epaper_preview_to_bytes(self, img) -> bytes:
         cfg = self.epaper_current_config()
         codes = image_to_codes(img, cfg["palette_rgb"], cfg["palette_values"])
-        data = pack_codes(codes, cfg["bpp"], cfg["order"])
+
+        # 行尾补齐颜色。四色屏里 WHITE 通常是 palette_values[1]。
+        pad_value = cfg["palette_values"][1] if len(cfg["palette_values"]) > 1 else 0
+
+        data = pack_codes(
+            codes,
+            cfg["w"],
+            cfg["h"],
+            cfg["bpp"],
+            cfg["order"],
+            pad_value=pad_value,
+        )
+
         expected = output_size(cfg["w"], cfg["h"], cfg["bpp"])
         if len(data) != expected:
             raise RuntimeError(f"输出大小错误：{len(data)}，期望 {expected}")
