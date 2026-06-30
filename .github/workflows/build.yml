@@ -20,13 +20,13 @@ jobs:
         include:
           - name: Windows
             os: windows-latest
-            package_name: ArtifexDisplayConverter-Windows
+            package: ArtifexDisplayConverter-Windows
           - name: macOS
             os: macos-latest
-            package_name: ArtifexDisplayConverter-macOS
+            package: ArtifexDisplayConverter-macOS
           - name: Linux
             os: ubuntu-latest
-            package_name: ArtifexDisplayConverter-Linux
+            package: ArtifexDisplayConverter-Linux
 
     steps:
       - name: Checkout code
@@ -50,22 +50,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # 这里只检查 Python 依赖和 imageio-ffmpeg 是否可用。
+      # 注意：不要在这里运行 python Tool.py --self-test，
+      # 因为此时 FFmpeg 还没有被 build.py 复制/打包到 Tool.py 能找到的位置。
       - name: Validate dependency imports
         shell: bash
         run: |
-          python -c "import PIL; import imageio_ffmpeg; print('Pillow OK'); print('FFmpeg:', imageio_ffmpeg.get_ffmpeg_exe())"
-          python Tool.py --self-test
+          python -c "from PIL import Image; import tkinterdnd2; import imageio_ffmpeg; print('Pillow OK'); print('tkinterdnd2 OK'); print('imageio-ffmpeg OK'); print('FFmpeg from imageio:', imageio_ffmpeg.get_ffmpeg_exe())"
 
       - name: Build with PyInstaller
         shell: bash
         run: |
           python build.py
 
+      # 检查 PyInstaller 产物本体是否能运行。
       - name: Smoke test packaged app
         shell: bash
         run: |
           echo "=== dist structure ==="
-          find dist -maxdepth 5 -print
+          find dist -maxdepth 6 -print
 
           if [ "$RUNNER_OS" = "Windows" ]; then
             ./dist/ArtifexDisplayConverter.exe --self-test
@@ -76,26 +79,55 @@ jobs:
             ls -l "$BIN"
             chmod +x "$BIN"
             "$BIN" --self-test
-            echo "=== Gatekeeper assessment, unsigned app may be rejected ==="
+            echo "=== Gatekeeper check, unsigned app may be rejected ==="
             spctl --assess --type execute -vv "$APP" || true
           else
             chmod +x ./dist/ArtifexDisplayConverter
-            xvfb-run -a ./dist/ArtifexDisplayConverter --self-test
+            ./dist/ArtifexDisplayConverter --self-test
           fi
 
       - name: Package app
         shell: bash
         run: |
-          python package_release.py "${{ matrix.package_name }}"
+          python package_release.py "${{ matrix.package }}"
+          echo "=== release structure ==="
+          find release -maxdepth 3 -print
+
+      # 检查最终 zip 解压后是否仍能运行。
+      - name: Test final zip after extraction
+        shell: bash
+        run: |
+          ZIP="release/${{ matrix.package }}.zip"
+          EXTRACT="test_extract/${{ matrix.package }}"
+          mkdir -p "$EXTRACT"
+          python -c "import zipfile; zipfile.ZipFile(r'$ZIP').extractall(r'$EXTRACT')"
+
+          echo "=== extracted structure ==="
+          find "$EXTRACT" -maxdepth 8 -print
+
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            "$EXTRACT/ArtifexDisplayConverter.exe" --self-test
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            APP="$EXTRACT/ArtifexDisplayConverter.app"
+            BIN="$APP/Contents/MacOS/ArtifexDisplayConverter"
+            echo "=== extracted macOS executable permissions ==="
+            ls -l "$BIN"
+            chmod +x "$BIN"
+            "$BIN" --self-test
+          else
+            chmod +x "$EXTRACT/ArtifexDisplayConverter"
+            "$EXTRACT/ArtifexDisplayConverter" --self-test
+          fi
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.package_name }}
-          path: release/${{ matrix.package_name }}.zip
+          name: ${{ matrix.package }}
+          path: release/${{ matrix.package }}.zip
+          if-no-files-found: error
 
       - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: release/${{ matrix.package_name }}.zip
+          files: release/${{ matrix.package }}.zip
