@@ -27,6 +27,10 @@ def copy_ffmpeg() -> Path:
         current_mode = ffmpeg_target.stat().st_mode
         ffmpeg_target.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
+    print(f"[BUILD] system={platform.system()}")
+    print(f"[BUILD] machine={platform.machine()}")
+    print(f"[BUILD] python={sys.version}")
+    print(f"[BUILD] executable={sys.executable}")
     print(f"[BUILD] FFmpeg source: {ffmpeg_src}")
     print(f"[BUILD] FFmpeg bundled as: {ffmpeg_target}")
 
@@ -34,13 +38,7 @@ def copy_ffmpeg() -> Path:
 
 
 def main():
-    print(f"[BUILD] system={platform.system()}")
-    print(f"[BUILD] machine={platform.machine()}")
-    print(f"[BUILD] python={sys.version}")
-    print(f"[BUILD] executable={sys.executable}")
-
     ffmpeg_target = copy_ffmpeg()
-
     add_binary_sep = ";" if platform.system() == "Windows" else ":"
 
     cmd = [
@@ -55,21 +53,28 @@ def main():
         APP_NAME,
         "--add-binary",
         f"{ffmpeg_target}{add_binary_sep}.",
-        "--collect-all",
-        "tkinterdnd2",
-        ENTRY_FILE,
     ]
+
+    # Windows 保留 tkinterdnd2 拖拽功能。
+    # macOS arm64 禁用 tkinterdnd2，避免 tkdnd: "Unable to load tkdnd library."
+    if platform.system() == "Windows":
+        cmd.extend(["--collect-all", "tkinterdnd2"])
+        print("[BUILD] Windows: collect tkinterdnd2 enabled")
+    elif platform.system() == "Darwin":
+        print("[BUILD] macOS: tkinterdnd2 collection skipped")
+    else:
+        print("[BUILD] Linux/other: tkinterdnd2 collection skipped")
 
     target_arch = os.environ.get("PYINSTALLER_TARGET_ARCH", "").strip()
     if platform.system() == "Darwin" and target_arch:
         cmd.extend(["--target-arch", target_arch])
         print(f"[BUILD] macOS target arch: {target_arch}")
 
+    cmd.append(ENTRY_FILE)
+
     print("[BUILD] running:")
     print(" ".join(cmd))
-
     subprocess.check_call(cmd)
-
     print("[BUILD] done")
 
 

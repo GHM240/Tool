@@ -15,13 +15,11 @@ def zip_path(src: Path, dst_zip: Path):
             for p in src.rglob("*"):
                 arcname = p.relative_to(src.parent)
                 info = zipfile.ZipInfo(str(arcname))
-
                 if p.is_dir():
                     info.external_attr = 0o755 << 16
                     zf.writestr(info, "")
                 else:
-                    mode = p.stat().st_mode
-                    info.external_attr = mode << 16
+                    info.external_attr = p.stat().st_mode << 16
                     with open(p, "rb") as f:
                         zf.writestr(info, f.read())
         else:
@@ -33,15 +31,13 @@ def zip_path(src: Path, dst_zip: Path):
 
 def main():
     system = platform.system()
-
     package_name = os.environ.get("PACKAGE_NAME")
+
     if not package_name:
-        if system == "Darwin":
-            package_name = f"{APP_NAME}-macOS-arm64"
-        elif system == "Windows":
+        if system == "Windows":
             package_name = f"{APP_NAME}-Windows"
-        elif system == "Linux":
-            package_name = f"{APP_NAME}-Linux"
+        elif system == "Darwin":
+            package_name = f"{APP_NAME}-macOS-arm64"
         else:
             package_name = f"{APP_NAME}-{system}"
 
@@ -60,7 +56,6 @@ def main():
         raise FileNotFoundError(f"Build output not found: {src}")
 
     dst_zip = release_dir / f"{package_name}.zip"
-
     if dst_zip.exists():
         dst_zip.unlink()
 

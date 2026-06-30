@@ -24,22 +24,37 @@ import shutil
 import webbrowser
 import tkinter as tk
 from pathlib import Path
+from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 # ========== 可选依赖：拖拽 ==========
-try:
-    from tkinterdnd2 import DND_FILES, TkinterDnD
-    HAS_DND = True
-    DND_IMPORT_ERROR = None
-except Exception as e:
-    DND_FILES = None
-    TkinterDnD = None
-    HAS_DND = False
-    DND_IMPORT_ERROR = e
-
-# HAS_DND 只代表 tkinterdnd2 import 成功；
-# DND_RUNTIME_OK 代表 TkinterDnD.Tk() 真正初始化成功。
+# 说明：
+# 1. Windows 版本：保留 tkinterdnd2 拖拽功能。
+# 2. macOS arm64 / M 系列版本：禁用 tkinterdnd2。
+#    原因：tkinterdnd2 底层依赖 tkdnd；在 macOS arm64 打包环境里容易出现
+#    “Unable to load tkdnd library.”，导致 GUI 初始化失败或 App 闪退。
+# 3. 拖拽只是辅助功能，不能影响主程序打开。macOS 用户仍可用“选择文件/选择文件夹”。
+DND_FILES = None
+TkinterDnD = None
+HAS_DND = False
 DND_RUNTIME_OK = False
+DND_IMPORT_ERROR = None
+DND_DISABLED_REASON = None
+
+if platform.system() == "Darwin":
+    DND_DISABLED_REASON = "disabled on macOS to avoid tkdnd runtime crash"
+else:
+    try:
+        from tkinterdnd2 import DND_FILES, TkinterDnD
+        HAS_DND = True
+        DND_IMPORT_ERROR = None
+        DND_DISABLED_REASON = None
+    except Exception as e:
+        DND_FILES = None
+        TkinterDnD = None
+        HAS_DND = False
+        DND_IMPORT_ERROR = e
+        DND_DISABLED_REASON = f"import failed: {e}"
 
 # ========== 可选依赖：Pillow ==========
 try:
@@ -180,16 +195,88 @@ def packaged_missing_message(name: str, dev_hint: str) -> str:
     return dev_hint
 
 
+
+# =========================
+# 日志
+# =========================
+def log_dir() -> Path:
+    """返回日志目录。"""
+    system = platform.system()
+    if system == "Darwin":
+        d = Path.home() / "Library" / "Logs"
+    elif system == "Windows":
+        base = os.environ.get("LOCALAPPDATA")
+        d = Path(base) / "ArtifexDisplayConverter" / "Logs" if base else Path.home() / "AppData" / "Local" / "ArtifexDisplayConverter" / "Logs"
+    else:
+        d = Path.home() / ".cache" / "ArtifexDisplayConverter" / "logs"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        d = Path.cwd()
+    return d
+
+
+def boot_log_path() -> Path:
+    return log_dir() / "ArtifexDisplayConverter_boot.log"
+
+
+def crash_log_path() -> Path:
+    return log_dir() / "ArtifexDisplayConverter_crash.log"
+
+
+def log_event(message: str):
+    """同时写入日志文件和 stderr，方便 GitHub Actions / 终端查看。"""
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+    try:
+        with open(boot_log_path(), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    print(line, file=sys.stderr)
+
+
+def write_crash_log(context: str = "crash"):
+    """把当前异常写入 crash log。必须在 except 块内调用。"""
+    path = crash_log_path()
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n" + "=" * 80 + "\n")
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {context}\n")
+            f.write(f"system={platform.system()} machine={platform.machine()} python={sys.version}\n")
+            f.write(f"frozen={is_frozen_app()} app_dir={app_dir()} resource_dir={resource_dir()}\n")
+            f.write(f"HAS_DND={HAS_DND} DND_RUNTIME_OK={DND_RUNTIME_OK} DND_DISABLED_REASON={DND_DISABLED_REASON}\n")
+            traceback.print_exc(file=f)
+    except Exception as e:
+        print(f"[ERROR] Failed to write crash log: {e}", file=sys.stderr)
+    log_event(f"[ERROR] Crash log saved to: {path}")
+
+
+def log_environment(prefix: str = "ENV"):
+    log_event(
+        f"{prefix}: system={platform.system()} machine={platform.machine()} "
+        f"python={sys.version.split()[0]} frozen={is_frozen_app()}"
+    )
+    log_event(f"{prefix}: app_dir={app_dir()}")
+    log_event(f"{prefix}: resource_dir={resource_dir()}")
+    log_event(
+        f"{prefix}: HAS_DND={HAS_DND} DND_RUNTIME_OK={DND_RUNTIME_OK} "
+        f"DND_DISABLED_REASON={DND_DISABLED_REASON}"
+    )
+
+
 def self_test() -> int:
     """GitHub Actions 用的无 GUI 自检，不创建 Tk 窗口。"""
     print("Artifex Display Converter self-test")
     print(f"system={platform.system()}")
+    print(f"machine={platform.machine()}")
     print(f"python={sys.version.split()[0]}")
     print(f"frozen={is_frozen_app()}")
     print(f"app_dir={app_dir()}")
     print(f"resource_dir={resource_dir()}")
+    print(f"log_dir={log_dir()}")
     print(f"Pillow={'OK' if HAS_PIL else 'MISSING'}")
-    print(f"tkinterdnd2={'OK' if HAS_DND else 'MISSING/OPTIONAL'}")
+    print(f"tkinterdnd2={'OK' if HAS_DND else 'DISABLED/MISSING/OPTIONAL'}")
+    print(f"DND_DISABLED_REASON={DND_DISABLED_REASON}")
     ffmpeg = find_ffmpeg_binary()
     print(f"ffmpeg={ffmpeg or 'MISSING'}")
     if not HAS_PIL:
@@ -1377,44 +1464,51 @@ class DisplayConverterApp:
             messagebox.showerror("导出失败", str(e))
 
 
+
 def create_root():
     """
     创建 GUI 根窗口。
 
-    tkinterdnd2 是可选拖拽功能：
-    - TkinterDnD.Tk() 成功：启用拖拽
-    - TkinterDnD.Tk() 失败：自动降级普通 tk.Tk()
+    Windows：
+        优先使用 TkinterDnD.Tk()，支持拖拽；失败则降级普通 tk.Tk()。
+
+    macOS arm64 / M 系列：
+        直接使用普通 tk.Tk()，避免 tkdnd 底层库加载失败导致闪退。
     """
     global HAS_DND, DND_RUNTIME_OK
 
     DND_RUNTIME_OK = False
 
+    if platform.system() == "Darwin":
+        log_event("[BOOT] macOS detected, tkinterdnd2 disabled, using normal tk.Tk()")
+        root = tk.Tk()
+        setattr(root, "_artifex_dnd_ready", False)
+        return root
+
     if HAS_DND and TkinterDnD is not None:
         try:
+            log_event("[BOOT] trying TkinterDnD.Tk()")
             root = TkinterDnD.Tk()
             DND_RUNTIME_OK = True
             setattr(root, "_artifex_dnd_ready", True)
-            print("[BOOT] TkinterDnD root created", file=sys.stderr)
+            log_event("[BOOT] TkinterDnD root created")
             return root
         except Exception as e:
-            # 关键：拖拽只是辅助功能，不能因为它失败导致整个 App 闪退。
             HAS_DND = False
             DND_RUNTIME_OK = False
-            print(f"[WARN] tkinterdnd2 初始化失败，已回退到普通 Tk：{e}", file=sys.stderr)
+            log_event(f"[WARN] tkinterdnd2 init failed, fallback to normal Tk: {e}")
             traceback.print_exc()
 
+    log_event("[BOOT] using normal tk.Tk()")
     root = tk.Tk()
     setattr(root, "_artifex_dnd_ready", False)
-    print("[BOOT] normal Tk root created", file=sys.stderr)
     return root
 
 
 def is_dnd_ready(widget=None):
     """
     判断拖拽功能是否真的可用。
-
-    不能只看 HAS_DND，因为 HAS_DND 只说明 import 成功；
-    真正能不能拖拽，要看 TkinterDnD.Tk() 是否初始化成功。
+    HAS_DND 只说明 import 成功；DND_RUNTIME_OK 才说明根窗口是 TkinterDnD.Tk()。
     """
     if not (HAS_DND and DND_RUNTIME_OK and DND_FILES is not None):
         return False
@@ -1428,74 +1522,76 @@ def is_dnd_ready(widget=None):
 def safe_bind_drop(widget, callback):
     """
     安全绑定拖拽事件。
-
     拖拽不可用时直接返回 False，不抛异常，不影响主程序打开。
     """
+    if platform.system() == "Darwin":
+        log_event("[BOOT] drag-and-drop skipped on macOS")
+        return False
+
     if not is_dnd_ready(widget):
+        log_event("[BOOT] drag-and-drop unavailable")
         return False
 
     try:
         widget.drop_target_register(DND_FILES)
         widget.dnd_bind("<<Drop>>", callback)
-        print("[BOOT] drag-and-drop enabled", file=sys.stderr)
+        log_event("[BOOT] drag-and-drop enabled")
         return True
     except Exception as e:
-        print(f"[WARN] 拖拽绑定失败，已跳过拖拽功能：{e}", file=sys.stderr)
+        log_event(f"[WARN] drag-and-drop bind failed, skipped: {e}")
         traceback.print_exc()
         return False
 
 
-def write_crash_log():
-    """
-    GUI 闪退时，把完整 Python 异常写入日志。
-    macOS 下写到 ~/Library/Logs，方便用户找到。
-    """
-    try:
-        log_dir = Path.home() / "Library" / "Logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "ArtifexDisplayConverter_crash.log"
-    except Exception:
-        log_path = Path.cwd() / "ArtifexDisplayConverter_crash.log"
-
-    try:
-        with open(log_path, "w", encoding="utf-8") as f:
-            traceback.print_exc(file=f)
-        print(f"[ERROR] Crash log saved to: {log_path}", file=sys.stderr)
-    except Exception as e:
-        print(f"[ERROR] Failed to write crash log: {e}", file=sys.stderr)
-
-
 def main():
+    log_environment("START")
+
     if "--self-test" in sys.argv:
         raise SystemExit(self_test())
 
+    if "--tk-smoke-test" in sys.argv:
+        try:
+            log_event("[BOOT] TK smoke test start")
+            root = create_root()
+            root.update_idletasks()
+            root.update()
+            root.destroy()
+            print("TK smoke test OK")
+            log_event("[BOOT] TK smoke test OK")
+            raise SystemExit(0)
+        except Exception:
+            write_crash_log("TK smoke test failed")
+            traceback.print_exc()
+            raise SystemExit(10)
+
     if "--gui-smoke-test" in sys.argv:
         try:
-            print("[BOOT] GUI smoke test start", file=sys.stderr)
+            log_event("[BOOT] GUI smoke test start")
             root = create_root()
             app = DisplayConverterApp(root)
             root.update_idletasks()
             root.update()
             root.destroy()
             print("GUI smoke test OK")
+            log_event("[BOOT] GUI smoke test OK")
             raise SystemExit(0)
         except Exception:
-            write_crash_log()
+            write_crash_log("GUI smoke test failed")
             traceback.print_exc()
-            raise SystemExit(10)
+            raise SystemExit(11)
 
     try:
-        print("[BOOT] create root", file=sys.stderr)
+        log_event("[BOOT] create root")
         root = create_root()
 
-        print("[BOOT] create app", file=sys.stderr)
+        log_event("[BOOT] create app")
         app = DisplayConverterApp(root)
 
-        print("[BOOT] mainloop", file=sys.stderr)
+        log_event("[BOOT] mainloop")
         root.mainloop()
 
     except Exception:
-        write_crash_log()
+        write_crash_log("App crashed")
         traceback.print_exc()
         raise
 

@@ -1,4 +1,4 @@
-name: Build macOS arm64 App
+name: Build Windows and macOS arm64 Apps
 
 on:
   workflow_dispatch:
@@ -10,13 +10,27 @@ permissions:
   contents: write
 
 jobs:
-  build-macos-arm64:
-    name: Build macOS arm64
-    runs-on: macos-latest
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            package_name: ArtifexDisplayConverter-Windows
+            pyinstaller_arch: ""
+
+          - name: macOS-arm64
+            os: macos-latest
+            package_name: ArtifexDisplayConverter-macOS-arm64
+            pyinstaller_arch: arm64
 
     env:
-      PACKAGE_NAME: ArtifexDisplayConverter-macOS-arm64
-      PYINSTALLER_TARGET_ARCH: arm64
+      PACKAGE_NAME: ${{ matrix.package_name }}
+      PYINSTALLER_TARGET_ARCH: ${{ matrix.pyinstaller_arch }}
 
     steps:
       - name: Checkout code
@@ -33,12 +47,8 @@ jobs:
           echo "RUNNER_OS=$RUNNER_OS"
           echo "PACKAGE_NAME=$PACKAGE_NAME"
           echo "PYINSTALLER_TARGET_ARCH=$PYINSTALLER_TARGET_ARCH"
-
           python - <<'PY'
-          import sys
-          import platform
-          import struct
-
+          import sys, platform, struct
           print("python:", sys.version)
           print("executable:", sys.executable)
           print("system:", platform.system())
@@ -46,12 +56,12 @@ jobs:
           print("processor:", platform.processor())
           print("bits:", struct.calcsize("P") * 8)
           PY
-
-          echo "uname -m:"
-          uname -m
-
-          echo "sw_vers:"
-          sw_vers
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            echo "uname -m:"
+            uname -m
+            echo "sw_vers:"
+            sw_vers
+          fi
 
       - name: Install Python dependencies
         shell: bash
@@ -64,7 +74,6 @@ jobs:
         run: |
           python - <<'PY'
           import platform
-
           print("system:", platform.system())
           print("machine:", platform.machine())
 
@@ -80,12 +89,11 @@ jobs:
           import tkinter
           print("tkinter OK")
 
-          try:
+          if platform.system() == "Darwin":
+              print("tkinterdnd2 skipped on macOS arm64")
+          else:
               import tkinterdnd2
               print("tkinterdnd2 OK")
-          except Exception as e:
-              print("tkinterdnd2 import failed:", e)
-              raise
           PY
 
       - name: Build with PyInstaller
@@ -99,24 +107,35 @@ jobs:
           echo "=== dist tree ==="
           find dist -maxdepth 5 -print || true
 
-          echo "=== app executable file info ==="
-          file "dist/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter"
-
-          echo "=== app executable permission ==="
-          ls -l "dist/ArtifexDisplayConverter.app/Contents/MacOS/"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            echo "=== app executable file info ==="
+            file "dist/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter"
+            echo "=== app executable permission ==="
+            ls -l "dist/ArtifexDisplayConverter.app/Contents/MacOS/"
+          fi
 
       - name: Smoke test packaged app
         shell: bash
         run: |
-          BIN="dist/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            BIN="dist/ArtifexDisplayConverter.exe"
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            BIN="dist/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter"
+          else
+            BIN="dist/ArtifexDisplayConverter"
+          fi
 
           echo "BIN=$BIN"
 
-          echo "=== file info ==="
-          file "$BIN"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            file "$BIN"
+          fi
 
           echo "=== self test ==="
           "$BIN" --self-test
+
+          echo "=== tk smoke test ==="
+          "$BIN" --tk-smoke-test
 
           echo "=== gui smoke test ==="
           "$BIN" --gui-smoke-test
@@ -135,25 +154,44 @@ jobs:
           ZIP="release/${PACKAGE_NAME}.zip"
           echo "Testing zip: $ZIP"
 
-          ditto -x -k "$ZIP" extracted
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            ditto -x -k "$ZIP" extracted
+          else
+            python - <<PY
+          import zipfile
+          zip_path = r"$ZIP"
+          with zipfile.ZipFile(zip_path, "r") as zf:
+              zf.extractall("extracted")
+          PY
+          fi
 
           echo "=== extracted tree ==="
           find extracted -maxdepth 5 -print || true
 
-          BIN="extracted/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            BIN="extracted/ArtifexDisplayConverter.exe"
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            BIN="extracted/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter"
+          else
+            BIN="extracted/ArtifexDisplayConverter"
+          fi
 
           echo "BIN=$BIN"
 
-          chmod +x "$BIN"
+          if [[ "$RUNNER_OS" != "Windows" ]]; then
+            chmod +x "$BIN"
+          fi
 
-          echo "=== file info ==="
-          file "$BIN"
-
-          echo "=== permission ==="
-          ls -l "$(dirname "$BIN")"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            file "$BIN"
+            ls -l "$(dirname "$BIN")"
+          fi
 
           echo "=== self test after extraction ==="
           "$BIN" --self-test
+
+          echo "=== tk smoke test after extraction ==="
+          "$BIN" --tk-smoke-test
 
           echo "=== gui smoke test after extraction ==="
           "$BIN" --gui-smoke-test
@@ -161,7 +199,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ArtifexDisplayConverter-macOS-arm64
+          name: ${{ matrix.package_name }}
           path: release/*.zip
 
       - name: Upload to GitHub Release
