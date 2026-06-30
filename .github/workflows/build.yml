@@ -1,4 +1,4 @@
-name: Build Desktop Apps
+name: Build macOS arm64 App
 
 on:
   workflow_dispatch:
@@ -10,23 +10,13 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+  build-macos-arm64:
+    name: Build macOS arm64
+    runs-on: macos-latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows
-            os: windows-latest
-            package: ArtifexDisplayConverter-Windows
-          - name: macOS
-            os: macos-latest
-            package: ArtifexDisplayConverter-macOS
-          - name: Linux
-            os: ubuntu-latest
-            package: ArtifexDisplayConverter-Linux
+    env:
+      PACKAGE_NAME: ArtifexDisplayConverter-macOS-arm64
+      PYINSTALLER_TARGET_ARCH: arm64
 
     steps:
       - name: Checkout code
@@ -37,12 +27,31 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Linux GUI build packages
-        if: runner.os == 'Linux'
+      - name: Print build environment
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk tk-dev xvfb
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "PACKAGE_NAME=$PACKAGE_NAME"
+          echo "PYINSTALLER_TARGET_ARCH=$PYINSTALLER_TARGET_ARCH"
+
+          python - <<'PY'
+          import sys
+          import platform
+          import struct
+
+          print("python:", sys.version)
+          print("executable:", sys.executable)
+          print("system:", platform.system())
+          print("machine:", platform.machine())
+          print("processor:", platform.processor())
+          print("bits:", struct.calcsize("P") * 8)
+          PY
+
+          echo "uname -m:"
+          uname -m
+
+          echo "sw_vers:"
+          sw_vers
 
       - name: Install Python dependencies
         shell: bash
@@ -50,84 +59,113 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 这里只检查 Python 依赖和 imageio-ffmpeg 是否可用。
-      # 注意：不要在这里运行 python Tool.py --self-test，
-      # 因为此时 FFmpeg 还没有被 build.py 复制/打包到 Tool.py 能找到的位置。
       - name: Validate dependency imports
         shell: bash
         run: |
-          python -c "from PIL import Image; import tkinterdnd2; import imageio_ffmpeg; print('Pillow OK'); print('tkinterdnd2 OK'); print('imageio-ffmpeg OK'); print('FFmpeg from imageio:', imageio_ffmpeg.get_ffmpeg_exe())"
+          python - <<'PY'
+          import platform
+
+          print("system:", platform.system())
+          print("machine:", platform.machine())
+
+          import PIL
+          print("Pillow OK")
+
+          import imageio_ffmpeg
+          print("FFmpeg from imageio:", imageio_ffmpeg.get_ffmpeg_exe())
+
+          import PyInstaller
+          print("PyInstaller OK")
+
+          import tkinter
+          print("tkinter OK")
+
+          try:
+              import tkinterdnd2
+              print("tkinterdnd2 OK")
+          except Exception as e:
+              print("tkinterdnd2 import failed:", e)
+              raise
+          PY
 
       - name: Build with PyInstaller
         shell: bash
         run: |
           python build.py
 
-      # 检查 PyInstaller 产物本体是否能运行。
+      - name: Show dist files
+        shell: bash
+        run: |
+          echo "=== dist tree ==="
+          find dist -maxdepth 5 -print || true
+
+          echo "=== app executable file info ==="
+          file "dist/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter"
+
+          echo "=== app executable permission ==="
+          ls -l "dist/ArtifexDisplayConverter.app/Contents/MacOS/"
+
       - name: Smoke test packaged app
         shell: bash
         run: |
-          echo "=== dist structure ==="
-          find dist -maxdepth 6 -print
+          BIN="dist/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter"
 
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            ./dist/ArtifexDisplayConverter.exe --self-test
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            APP="dist/ArtifexDisplayConverter.app"
-            BIN="$APP/Contents/MacOS/ArtifexDisplayConverter"
-            echo "=== macOS executable permissions ==="
-            ls -l "$BIN"
-            chmod +x "$BIN"
-            "$BIN" --self-test
-            echo "=== Gatekeeper check, unsigned app may be rejected ==="
-            spctl --assess --type execute -vv "$APP" || true
-          else
-            chmod +x ./dist/ArtifexDisplayConverter
-            ./dist/ArtifexDisplayConverter --self-test
-          fi
+          echo "BIN=$BIN"
+
+          echo "=== file info ==="
+          file "$BIN"
+
+          echo "=== self test ==="
+          "$BIN" --self-test
+
+          echo "=== gui smoke test ==="
+          "$BIN" --gui-smoke-test
 
       - name: Package app
         shell: bash
         run: |
-          python package_release.py "${{ matrix.package }}"
-          echo "=== release structure ==="
-          find release -maxdepth 3 -print
+          python package_release.py
 
-      # 检查最终 zip 解压后是否仍能运行。
       - name: Test final zip after extraction
         shell: bash
         run: |
-          ZIP="release/${{ matrix.package }}.zip"
-          EXTRACT="test_extract/${{ matrix.package }}"
-          mkdir -p "$EXTRACT"
-          python -c "import zipfile; zipfile.ZipFile(r'$ZIP').extractall(r'$EXTRACT')"
+          rm -rf extracted
+          mkdir extracted
 
-          echo "=== extracted structure ==="
-          find "$EXTRACT" -maxdepth 8 -print
+          ZIP="release/${PACKAGE_NAME}.zip"
+          echo "Testing zip: $ZIP"
 
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            "$EXTRACT/ArtifexDisplayConverter.exe" --self-test
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            APP="$EXTRACT/ArtifexDisplayConverter.app"
-            BIN="$APP/Contents/MacOS/ArtifexDisplayConverter"
-            echo "=== extracted macOS executable permissions ==="
-            ls -l "$BIN"
-            chmod +x "$BIN"
-            "$BIN" --self-test
-          else
-            chmod +x "$EXTRACT/ArtifexDisplayConverter"
-            "$EXTRACT/ArtifexDisplayConverter" --self-test
-          fi
+          ditto -x -k "$ZIP" extracted
+
+          echo "=== extracted tree ==="
+          find extracted -maxdepth 5 -print || true
+
+          BIN="extracted/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter"
+
+          echo "BIN=$BIN"
+
+          chmod +x "$BIN"
+
+          echo "=== file info ==="
+          file "$BIN"
+
+          echo "=== permission ==="
+          ls -l "$(dirname "$BIN")"
+
+          echo "=== self test after extraction ==="
+          "$BIN" --self-test
+
+          echo "=== gui smoke test after extraction ==="
+          "$BIN" --gui-smoke-test
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.package }}
-          path: release/${{ matrix.package }}.zip
-          if-no-files-found: error
+          name: ArtifexDisplayConverter-macOS-arm64
+          path: release/*.zip
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: release/${{ matrix.package }}.zip
+          files: release/*.zip

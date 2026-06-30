@@ -16,6 +16,7 @@ Artifex Display Converter
 import os
 import re
 import sys
+import traceback
 import subprocess
 import threading
 import platform
@@ -29,10 +30,16 @@ from tkinter import filedialog, messagebox, ttk
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
     HAS_DND = True
-except Exception:
+    DND_IMPORT_ERROR = None
+except Exception as e:
     DND_FILES = None
     TkinterDnD = None
     HAS_DND = False
+    DND_IMPORT_ERROR = e
+
+# HAS_DND 只代表 tkinterdnd2 import 成功；
+# DND_RUNTIME_OK 代表 TkinterDnD.Tk() 真正初始化成功。
+DND_RUNTIME_OK = False
 
 # ========== 可选依赖：Pillow ==========
 try:
@@ -703,13 +710,17 @@ class DisplayConverterApp:
 
     # ---------- 拖拽 ----------
     def setup_drag_drop(self):
-        if not HAS_DND:
-            return
-        try:
-            self.root.drop_target_register(DND_FILES)
-            self.root.dnd_bind("<<Drop>>", self.on_drop)
-        except Exception:
-            pass
+        """
+        安全启用拖拽。
+
+        macOS 打包版里，tkinterdnd2 可能 import 成功，
+        但 TkinterDnD.Tk() 或 drop_target_register() 在运行时失败。
+        拖拽只是辅助功能，失败时不能让整个 App 闪退。
+        """
+        if safe_bind_drop(self.root, self.on_drop):
+            self.set_status("拖拽功能已启用。")
+        else:
+            self.set_status("拖拽功能未启用；可继续使用“选择文件/选择文件夹”按钮。")
 
     def on_drop(self, event):
         files = self.parse_drop_files(event.data)
@@ -1367,18 +1378,126 @@ class DisplayConverterApp:
 
 
 def create_root():
-    if HAS_DND:
-        return TkinterDnD.Tk()
-    return tk.Tk()
+    """
+    创建 GUI 根窗口。
+
+    tkinterdnd2 是可选拖拽功能：
+    - TkinterDnD.Tk() 成功：启用拖拽
+    - TkinterDnD.Tk() 失败：自动降级普通 tk.Tk()
+    """
+    global HAS_DND, DND_RUNTIME_OK
+
+    DND_RUNTIME_OK = False
+
+    if HAS_DND and TkinterDnD is not None:
+        try:
+            root = TkinterDnD.Tk()
+            DND_RUNTIME_OK = True
+            setattr(root, "_artifex_dnd_ready", True)
+            print("[BOOT] TkinterDnD root created", file=sys.stderr)
+            return root
+        except Exception as e:
+            # 关键：拖拽只是辅助功能，不能因为它失败导致整个 App 闪退。
+            HAS_DND = False
+            DND_RUNTIME_OK = False
+            print(f"[WARN] tkinterdnd2 初始化失败，已回退到普通 Tk：{e}", file=sys.stderr)
+            traceback.print_exc()
+
+    root = tk.Tk()
+    setattr(root, "_artifex_dnd_ready", False)
+    print("[BOOT] normal Tk root created", file=sys.stderr)
+    return root
+
+
+def is_dnd_ready(widget=None):
+    """
+    判断拖拽功能是否真的可用。
+
+    不能只看 HAS_DND，因为 HAS_DND 只说明 import 成功；
+    真正能不能拖拽，要看 TkinterDnD.Tk() 是否初始化成功。
+    """
+    if not (HAS_DND and DND_RUNTIME_OK and DND_FILES is not None):
+        return False
+
+    if widget is None:
+        return True
+
+    return hasattr(widget, "drop_target_register") and hasattr(widget, "dnd_bind")
+
+
+def safe_bind_drop(widget, callback):
+    """
+    安全绑定拖拽事件。
+
+    拖拽不可用时直接返回 False，不抛异常，不影响主程序打开。
+    """
+    if not is_dnd_ready(widget):
+        return False
+
+    try:
+        widget.drop_target_register(DND_FILES)
+        widget.dnd_bind("<<Drop>>", callback)
+        print("[BOOT] drag-and-drop enabled", file=sys.stderr)
+        return True
+    except Exception as e:
+        print(f"[WARN] 拖拽绑定失败，已跳过拖拽功能：{e}", file=sys.stderr)
+        traceback.print_exc()
+        return False
+
+
+def write_crash_log():
+    """
+    GUI 闪退时，把完整 Python 异常写入日志。
+    macOS 下写到 ~/Library/Logs，方便用户找到。
+    """
+    try:
+        log_dir = Path.home() / "Library" / "Logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "ArtifexDisplayConverter_crash.log"
+    except Exception:
+        log_path = Path.cwd() / "ArtifexDisplayConverter_crash.log"
+
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            traceback.print_exc(file=f)
+        print(f"[ERROR] Crash log saved to: {log_path}", file=sys.stderr)
+    except Exception as e:
+        print(f"[ERROR] Failed to write crash log: {e}", file=sys.stderr)
 
 
 def main():
     if "--self-test" in sys.argv:
         raise SystemExit(self_test())
 
-    root = create_root()
-    app = DisplayConverterApp(root)
-    root.mainloop()
+    if "--gui-smoke-test" in sys.argv:
+        try:
+            print("[BOOT] GUI smoke test start", file=sys.stderr)
+            root = create_root()
+            app = DisplayConverterApp(root)
+            root.update_idletasks()
+            root.update()
+            root.destroy()
+            print("GUI smoke test OK")
+            raise SystemExit(0)
+        except Exception:
+            write_crash_log()
+            traceback.print_exc()
+            raise SystemExit(10)
+
+    try:
+        print("[BOOT] create root", file=sys.stderr)
+        root = create_root()
+
+        print("[BOOT] create app", file=sys.stderr)
+        app = DisplayConverterApp(root)
+
+        print("[BOOT] mainloop", file=sys.stderr)
+        root.mainloop()
+
+    except Exception:
+        write_crash_log()
+        traceback.print_exc()
+        raise
 
 
 if __name__ == "__main__":

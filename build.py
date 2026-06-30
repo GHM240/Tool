@@ -1,51 +1,47 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Build helper for GitHub Actions and local PyInstaller packaging.
-
-It downloads/locates the platform-matching FFmpeg executable from imageio-ffmpeg,
-renames it to ffmpeg/ffmpeg.exe, and bundles it into the PyInstaller app.
-This matches Tool.py's runtime search logic, so end users do not need to
-install FFmpeg separately.
-"""
-
-from __future__ import annotations
-
 import os
-import platform
-import shutil
-import subprocess
 import sys
+import shutil
+import stat
+import subprocess
+import platform
 from pathlib import Path
 
 import imageio_ffmpeg
+
 
 APP_NAME = "ArtifexDisplayConverter"
 ENTRY_FILE = "Tool.py"
 
 
-def prepare_ffmpeg_binary() -> Path:
-    source = Path(imageio_ffmpeg.get_ffmpeg_exe()).resolve()
-    if not source.exists():
-        raise FileNotFoundError(f"imageio-ffmpeg returned a missing file: {source}")
+def copy_ffmpeg() -> Path:
+    ffmpeg_src = Path(imageio_ffmpeg.get_ffmpeg_exe())
+    assets_dir = Path("build_assets")
+    assets_dir.mkdir(exist_ok=True)
 
-    out_dir = Path("build_assets").resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    ffmpeg_name = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
+    ffmpeg_target = assets_dir / ffmpeg_name
 
-    exe_name = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
-    target = out_dir / exe_name
-    shutil.copy2(source, target)
+    shutil.copy2(ffmpeg_src, ffmpeg_target)
 
     if platform.system() != "Windows":
-        target.chmod(target.stat().st_mode | 0o111)
+        current_mode = ffmpeg_target.stat().st_mode
+        ffmpeg_target.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    print(f"Bundled FFmpeg: {target}")
-    return target
+    print(f"[BUILD] FFmpeg source: {ffmpeg_src}")
+    print(f"[BUILD] FFmpeg bundled as: {ffmpeg_target}")
+
+    return ffmpeg_target
 
 
-def main() -> int:
-    ffmpeg_target = prepare_ffmpeg_binary()
-    add_binary_sep = os.pathsep  # ';' on Windows, ':' on macOS/Linux
+def main():
+    print(f"[BUILD] system={platform.system()}")
+    print(f"[BUILD] machine={platform.machine()}")
+    print(f"[BUILD] python={sys.version}")
+    print(f"[BUILD] executable={sys.executable}")
+
+    ffmpeg_target = copy_ffmpeg()
+
+    add_binary_sep = ";" if platform.system() == "Windows" else ":"
 
     cmd = [
         sys.executable,
@@ -64,11 +60,18 @@ def main() -> int:
         ENTRY_FILE,
     ]
 
-    print("Running:")
-    print(" ".join(str(x) for x in cmd))
+    target_arch = os.environ.get("PYINSTALLER_TARGET_ARCH", "").strip()
+    if platform.system() == "Darwin" and target_arch:
+        cmd.extend(["--target-arch", target_arch])
+        print(f"[BUILD] macOS target arch: {target_arch}")
+
+    print("[BUILD] running:")
+    print(" ".join(cmd))
+
     subprocess.check_call(cmd)
-    return 0
+
+    print("[BUILD] done")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

@@ -1,122 +1,87 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""Create a clean zip package from PyInstaller output.
-
-macOS .app bundles should be packaged with ditto when available, because it
-preserves app-bundle metadata, symlinks, executable bits, and resource forks
-better than a generic Python zip walk. This avoids common "app cannot be opened"
-issues after downloading/unzipping on macOS.
-"""
-
-from __future__ import annotations
-
 import os
-import platform
 import shutil
-import stat
-import subprocess
-import sys
 import zipfile
+import platform
+import subprocess
 from pathlib import Path
+
 
 APP_NAME = "ArtifexDisplayConverter"
 
 
-def make_executable_if_needed(path: Path) -> None:
-    if path.exists() and path.is_file() and os.name != "nt":
-        mode = path.stat().st_mode
-        path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+def zip_path(src: Path, dst_zip: Path):
+    with zipfile.ZipFile(dst_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if src.is_dir():
+            for p in src.rglob("*"):
+                arcname = p.relative_to(src.parent)
+                info = zipfile.ZipInfo(str(arcname))
+
+                if p.is_dir():
+                    info.external_attr = 0o755 << 16
+                    zf.writestr(info, "")
+                else:
+                    mode = p.stat().st_mode
+                    info.external_attr = mode << 16
+                    with open(p, "rb") as f:
+                        zf.writestr(info, f.read())
+        else:
+            info = zipfile.ZipInfo(src.name)
+            info.external_attr = src.stat().st_mode << 16
+            with open(src, "rb") as f:
+                zf.writestr(info, f.read())
 
 
-def add_path_to_zip(zf: zipfile.ZipFile, path: Path, arc_root: str | None = None) -> None:
-    path = path.resolve()
-    if path.is_file():
-        make_executable_if_needed(path)
-        arcname = Path(arc_root) / path.name if arc_root else Path(path.name)
-        zf.write(path, arcname.as_posix())
-        return
+def main():
+    system = platform.system()
 
-    base = path.parent
-    for p in path.rglob("*"):
-        # Store symlinks as their targets when using generic zip fallback.
-        # On macOS .app, ditto path below is preferred and avoids this fallback.
-        if p.is_file():
-            make_executable_if_needed(p)
-            zf.write(p, p.relative_to(base).as_posix())
+    package_name = os.environ.get("PACKAGE_NAME")
+    if not package_name:
+        if system == "Darwin":
+            package_name = f"{APP_NAME}-macOS-arm64"
+        elif system == "Windows":
+            package_name = f"{APP_NAME}-Windows"
+        elif system == "Linux":
+            package_name = f"{APP_NAME}-Linux"
+        else:
+            package_name = f"{APP_NAME}-{system}"
 
+    dist_dir = Path("dist")
+    release_dir = Path("release")
+    release_dir.mkdir(exist_ok=True)
 
-def find_target(dist: Path) -> Path:
-    candidates = [
-        dist / f"{APP_NAME}.exe",
-        dist / f"{APP_NAME}.app",
-        dist / APP_NAME,
-    ]
-    target = next((p for p in candidates if p.exists()), None)
-    if target is None:
-        raise FileNotFoundError(f"No PyInstaller output found in {dist.resolve()}")
-    return target
+    if system == "Windows":
+        src = dist_dir / f"{APP_NAME}.exe"
+    elif system == "Darwin":
+        src = dist_dir / f"{APP_NAME}.app"
+    else:
+        src = dist_dir / APP_NAME
 
+    if not src.exists():
+        raise FileNotFoundError(f"Build output not found: {src}")
 
-def zip_with_ditto(target: Path, zip_path: Path, readme: Path | None = None) -> bool:
-    """Use macOS ditto for .app bundle packaging when available."""
-    if platform.system() != "Darwin" or target.suffix != ".app":
-        return False
-    if shutil.which("ditto") is None:
-        return False
+    dst_zip = release_dir / f"{package_name}.zip"
 
-    staging = Path("release_staging").resolve()
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True, exist_ok=True)
+    if dst_zip.exists():
+        dst_zip.unlink()
 
-    shutil.copytree(target, staging / target.name, symlinks=True)
-    if readme and readme.exists():
-        shutil.copy2(readme, staging / "README.md")
+    if system == "Darwin" and src.suffix == ".app" and shutil.which("ditto"):
+        print(f"[PACKAGE] Using ditto for macOS app: {src}")
+        subprocess.check_call([
+            "ditto",
+            "-c",
+            "-k",
+            "--sequesterRsrc",
+            "--keepParent",
+            src.name,
+            str(dst_zip.resolve()),
+        ], cwd=src.parent)
+    else:
+        print(f"[PACKAGE] Using zipfile: {src}")
+        zip_path(src, dst_zip)
 
-    # Ensure main executable bit exists before packaging.
-    main_bin = staging / target.name / "Contents" / "MacOS" / APP_NAME
-    make_executable_if_needed(main_bin)
-
-    subprocess.check_call([
-        "ditto",
-        "-c",
-        "-k",
-        "--sequesterRsrc",
-        "--keepParent",
-        str(staging / target.name),
-        str(zip_path),
-    ], cwd=str(staging.parent))
-
-    # The command above with --keepParent only includes the app. Add README via generic zip append.
-    if readme and readme.exists():
-        with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
-            zf.write(readme, "README.md")
-
-    return True
-
-
-def main() -> int:
-    package_name = sys.argv[1] if len(sys.argv) > 1 else APP_NAME
-    dist = Path("dist")
-    release = Path("release")
-    release.mkdir(exist_ok=True)
-
-    target = find_target(dist)
-    readme = Path("README.md")
-    zip_path = release / f"{package_name}.zip"
-
-    if target.is_file():
-        make_executable_if_needed(target)
-
-    if not zip_with_ditto(target, zip_path, readme if readme.exists() else None):
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            add_path_to_zip(zf, target)
-            if readme.exists():
-                zf.write(readme, "README.md")
-
-    print(f"Created package: {zip_path}")
-    return 0
+    print(f"[PACKAGE] Created: {dst_zip}")
+    print(f"[PACKAGE] Size: {dst_zip.stat().st_size} bytes")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
