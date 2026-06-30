@@ -1,0 +1,71 @@
+name: Build Desktop Apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+            package_name: ArtifexDisplayConverter-Windows
+          - os: macos-latest
+            label: macOS
+            package_name: ArtifexDisplayConverter-macOS
+          - os: ubuntu-latest
+            label: Linux
+            package_name: ArtifexDisplayConverter-Linux
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Linux GUI build packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk tk-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate dependency imports
+        run: |
+          python -c "import tkinter; from PIL import Image; import imageio_ffmpeg; print('FFmpeg from imageio:', imageio_ffmpeg.get_ffmpeg_exe())"
+
+      - name: Build with PyInstaller
+        run: python build.py
+
+      - name: Package app
+        run: python package_release.py ${{ matrix.package_name }}
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package_name }}
+          path: release/*.zip
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.zip
