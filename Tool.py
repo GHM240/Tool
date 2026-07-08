@@ -330,7 +330,7 @@ def self_test() -> int:
 # =========================
 # 通用常量
 # =========================
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".mpeg", ".mpg"}
 MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
@@ -344,6 +344,79 @@ ACCENT = "#38BDF8"
 ACCENT_2 = "#F59E0B"
 SUCCESS = "#22C55E"
 DANGER = "#EF4444"
+
+
+def safe_askopenfilenames(title: str, allowed_exts: set[str], label: str):
+    """
+    跨平台安全文件选择。
+
+    修复点：
+    macOS 的 Tk/Aqua 原生文件选择框对 filetypes 参数比较敏感。
+    某些写法，例如 "*.png;*.jpg;*.jpeg"，在 macOS 上可能直接触发
+    -[__NSArrayM insertObject:atIndex:]: object cannot be nil
+    然后导致整个 app 意外退出。
+
+    处理策略：
+    - macOS：不把 filetypes 传给系统文件选择框，避免 Aqua 崩溃；
+      用户选完后再由 Python 按扩展名过滤。
+    - Windows / Linux：继续使用文件类型过滤，保持原来的使用体验。
+    """
+    normalized_exts = set()
+    for ext in allowed_exts:
+        ext = str(ext).strip().lower()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = "." + ext
+        normalized_exts.add(ext)
+
+    try:
+        if platform.system() == "Darwin":
+            selected = filedialog.askopenfilenames(title=title)
+        else:
+            patterns = " ".join(f"*{ext}" for ext in sorted(normalized_exts))
+            selected = filedialog.askopenfilenames(
+                title=title,
+                filetypes=[
+                    (label, patterns),
+                    ("所有文件", "*.*"),
+                ],
+            )
+
+        valid = []
+        ignored = []
+
+        for raw_path in selected:
+            path = str(raw_path)
+            if Path(path).suffix.lower() in normalized_exts:
+                valid.append(path)
+            else:
+                ignored.append(path)
+
+        return valid, ignored
+
+    except Exception as e:
+        log_event(f"[ERROR] safe_askopenfilenames failed: {e}")
+        try:
+            messagebox.showerror("选择文件失败", str(e))
+        except Exception:
+            pass
+        return [], []
+
+
+def show_ignored_files_warning(ignored):
+    """选择文件后提醒被过滤掉的不支持文件，最多显示 20 个，避免弹窗过长。"""
+    if not ignored:
+        return
+
+    shown = [Path(p).name for p in ignored[:20]]
+    more = len(ignored) - len(shown)
+
+    msg = "以下文件类型不支持，已自动忽略：\n\n" + "\n".join(shown)
+    if more > 0:
+        msg += f"\n\n另外还有 {more} 个文件未显示。"
+
+    messagebox.showwarning("已忽略不支持的文件", msg)
 
 
 # =========================
@@ -1286,12 +1359,14 @@ class DisplayConverterApp:
             self.lcd_custom_size_entry.pack_forget()
 
     def lcd_browse_files(self):
-        filenames = filedialog.askopenfilenames(
+        filenames, ignored = safe_askopenfilenames(
             title="选择视频或图片",
-            filetypes=[("媒体文件", "*.mp4 *.avi *.mov *.mkv *.jpg *.jpeg *.png *.bmp *.webp"), ("所有文件", "*.*")],
+            allowed_exts=MEDIA_EXTS,
+            label="媒体文件",
         )
         if filenames:
             self.lcd_add_files(filenames)
+        show_ignored_files_warning(ignored)
 
     def lcd_add_files(self, file_paths):
         added = 0
@@ -1585,12 +1660,14 @@ class DisplayConverterApp:
     def epaper_select_files(self):
         if not self.require_pil():
             return
-        paths = filedialog.askopenfilenames(
+        paths, ignored = safe_askopenfilenames(
             title="选择图片",
-            filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.tiff"), ("All files", "*.*")],
+            allowed_exts=IMAGE_EXTS,
+            label="图片文件",
         )
         if paths:
             self.epaper_set_paths(list(paths))
+        show_ignored_files_warning(ignored)
 
     def epaper_select_folder(self):
         if not self.require_pil():
