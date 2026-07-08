@@ -85,8 +85,11 @@ def app_dir() -> Path:
 
 def resource_dir() -> Path:
     """
-    返回 PyInstaller 放置内置资源/二进制文件的目录。
-    PyInstaller 6 的 onedir 默认会把依赖放入 _internal；onefile 会解压到临时 _MEIPASS。
+    返回 PyInstaller 资源目录。
+
+    注意：macOS onefile 会解压到 /private/var/folders/.../_MEIxxxx，
+    这个目录是临时目录，不能长期缓存，也不应该优先展示给用户。
+    运行时检测可以使用它，但发布包优先使用 .app/Contents/Resources。
     """
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
@@ -94,29 +97,67 @@ def resource_dir() -> Path:
     return app_dir()
 
 
+def macos_contents_dir() -> Path | None:
+    """如果当前运行在 macOS .app 中，返回 Contents 目录。"""
+    try:
+        exe = Path(sys.executable).resolve()
+        if exe.parent.name == "MacOS" and exe.parent.parent.name == "Contents":
+            return exe.parent.parent
+    except Exception:
+        pass
+    base = app_dir()
+    if base.name == "MacOS" and base.parent.name == "Contents":
+        return base.parent
+    return None
+
+
 def common_resource_dirs():
-    """按优先级返回可能存在 ffmpeg 的目录。"""
+    """按优先级返回可能存在 ffmpeg 的目录。
+
+    关键修复：macOS 优先查 .app/Contents/Resources，
+    再查 PyInstaller 临时 _MEIPASS。这样可以规避 Windows 正常、
+    macOS 因 _MEI 临时路径变化导致 No such file or directory 的问题。
+    """
     base = app_dir()
     res = resource_dir()
-    dirs = [
+    dirs = []
+
+    contents = macos_contents_dir()
+    if contents is not None:
+        dirs.extend([
+            contents / "Resources",
+            contents / "Resources" / "bin",
+            contents / "MacOS",
+            contents / "Frameworks",
+        ])
+
+    # onedir / 开发目录优先于 onefile 临时目录。
+    dirs.extend([
         base,
-        res,
-        base / "_internal",
-        res / "_internal",
+        base / "bin",
         base / "ffmpeg",
         base / "ffmpeg" / "bin",
+        base / "_internal",
+        base / "_internal" / "bin",
+    ])
+
+    # _MEIPASS 只作为运行时兜底，不缓存、不展示为稳定路径。
+    dirs.extend([
+        res,
+        res / "bin",
         res / "ffmpeg",
         res / "ffmpeg" / "bin",
-    ]
+        res / "_internal",
+        res / "_internal" / "bin",
+    ])
 
-    # macOS .app 常见结构：Contents/MacOS 与 Contents/Resources
-    if base.name == "MacOS" and base.parent.name == "Contents":
-        dirs.extend([base.parent / "Resources", base.parent / "Frameworks"])
-
-    # 去重并保序
     out = []
     seen = set()
     for d in dirs:
+        try:
+            d = Path(d).resolve()
+        except Exception:
+            d = Path(d)
         key = str(d)
         if key not in seen:
             seen.add(key)
@@ -303,6 +344,313 @@ ACCENT = "#38BDF8"
 ACCENT_2 = "#F59E0B"
 SUCCESS = "#22C55E"
 DANGER = "#EF4444"
+
+
+# =========================
+# 跨平台深色控件
+# =========================
+class FlatButton(tk.Label):
+    """
+    用 Label 自绘按钮，避免 macOS Aqua 原生 Button 忽略 bg/fg 导致变白。
+    支持 .config(state=tk.DISABLED / tk.NORMAL)，兼容原来的调用方式。
+    """
+
+    def __init__(self, parent, text, command=None, bg="#273449", fg=TEXT, active=None, disabled_bg="#475569", disabled_fg="#94A3B8"):
+        self.command = command
+        self._enabled = True
+        self._normal_bg = bg
+        self._normal_fg = fg
+        self._active_bg = active or self._lighten(bg)
+        self._active_fg = fg
+        self._disabled_bg = disabled_bg
+        self._disabled_fg = disabled_fg
+        super().__init__(
+            parent,
+            text=text,
+            bg=bg,
+            fg=fg,
+            activebackground=self._active_bg,
+            activeforeground=fg,
+            relief=tk.FLAT,
+            bd=0,
+            padx=12,
+            pady=8,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            anchor="center",
+        )
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+
+    @staticmethod
+    def _lighten(hex_color: str, amount: int = 18) -> str:
+        try:
+            h = hex_color.strip().lstrip("#")
+            r = min(255, int(h[0:2], 16) + amount)
+            g = min(255, int(h[2:4], 16) + amount)
+            b = min(255, int(h[4:6], 16) + amount)
+            return f"#{r:02X}{g:02X}{b:02X}"
+        except Exception:
+            return hex_color
+
+    def _on_enter(self, _event=None):
+        if self._enabled:
+            super().configure(bg=self._active_bg, fg=self._active_fg)
+
+    def _on_leave(self, _event=None):
+        if self._enabled:
+            super().configure(bg=self._normal_bg, fg=self._normal_fg)
+
+    def _on_click(self, _event=None):
+        if self._enabled and self.command:
+            self.command()
+
+    def configure(self, cnf=None, **kw):
+        if cnf:
+            kw.update(cnf)
+        state = kw.pop("state", None)
+        if "command" in kw:
+            self.command = kw.pop("command")
+        if "bg" in kw or "background" in kw:
+            new_bg = kw.get("bg", kw.get("background"))
+            self._normal_bg = new_bg
+            self._active_bg = self._lighten(new_bg)
+        if "fg" in kw or "foreground" in kw:
+            self._normal_fg = kw.get("fg", kw.get("foreground"))
+            self._active_fg = self._normal_fg
+        if state is not None:
+            self._enabled = state not in (tk.DISABLED, "disabled", False)
+            if self._enabled:
+                kw.setdefault("bg", self._normal_bg)
+                kw.setdefault("fg", self._normal_fg)
+                kw.setdefault("cursor", "hand2")
+            else:
+                kw.setdefault("bg", self._disabled_bg)
+                kw.setdefault("fg", self._disabled_fg)
+                kw.setdefault("cursor", "")
+        return super().configure(**kw)
+
+    config = configure
+
+
+class DarkDropdown(tk.Frame):
+    """自绘下拉框，替代 ttk.Combobox，避免 macOS 上变成白色原生控件。"""
+
+    def __init__(self, parent, textvariable, values, bg=CARD_BG, fg=TEXT, popup_bg="#0B1220", highlight="#243044", width=None, state="readonly"):
+        super().__init__(parent, bg=bg, highlightthickness=1, highlightbackground=highlight)
+        self.variable = textvariable
+        self.values = list(values)
+        self.bg = bg
+        self.fg = fg
+        self.popup_bg = popup_bg
+        self.highlight = highlight
+        self._callbacks = {}
+        self._popup = None
+        self._state = state
+        self._button = tk.Label(
+            self,
+            text="",
+            bg="#F8FAFC" if False else "#0B1220",
+            fg=fg,
+            padx=8,
+            pady=6,
+            anchor="w",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            cursor="hand2",
+            width=width,
+        )
+        self._button.pack(fill=tk.X)
+        self._button.bind("<Button-1>", self._open_popup)
+        self._button.bind("<Enter>", lambda _e: self._button.configure(bg="#111827"))
+        self._button.bind("<Leave>", lambda _e: self._button.configure(bg="#0B1220"))
+        try:
+            self.variable.trace_add("write", lambda *_: self._refresh_text())
+        except Exception:
+            pass
+        self._refresh_text()
+
+    def _display(self, value):
+        return str(value)
+
+    def _refresh_text(self):
+        try:
+            value = self.variable.get()
+        except Exception:
+            value = ""
+        self._button.configure(text=f"{value}  ▾")
+
+    def bind(self, sequence=None, func=None, add=None):
+        if sequence == "<<ComboboxSelected>>" and func is not None:
+            self._callbacks.setdefault(sequence, []).append(func)
+            return None
+        return super().bind(sequence, func, add)
+
+    def _fire(self, sequence):
+        class Event:
+            pass
+        event = Event()
+        event.widget = self
+        for cb in self._callbacks.get(sequence, []):
+            try:
+                cb(event)
+            except Exception:
+                traceback.print_exc()
+
+    def _open_popup(self, _event=None):
+        if self._state in (tk.DISABLED, "disabled"):
+            return
+        if self._popup is not None and self._popup.winfo_exists():
+            self._popup.destroy()
+            self._popup = None
+            return
+
+        popup = tk.Toplevel(self)
+        popup.overrideredirect(True)
+        popup.configure(bg=self.popup_bg, highlightthickness=1, highlightbackground=self.highlight)
+        self._popup = popup
+
+        lb = tk.Listbox(
+            popup,
+            bg=self.popup_bg,
+            fg=self.fg,
+            selectbackground=ACCENT,
+            selectforeground="#FFFFFF",
+            relief=tk.FLAT,
+            highlightthickness=0,
+            activestyle="none",
+            font=("Microsoft YaHei UI", 10),
+            exportselection=False,
+            height=min(max(len(self.values), 1), 8),
+        )
+        for v in self.values:
+            lb.insert(tk.END, self._display(v))
+        lb.pack(fill=tk.BOTH, expand=True)
+
+        try:
+            current = self.variable.get()
+            for i, v in enumerate(self.values):
+                if str(v) == str(current):
+                    lb.selection_set(i)
+                    lb.activate(i)
+                    lb.see(i)
+                    break
+        except Exception:
+            pass
+
+        def choose(_event=None):
+            sel = lb.curselection()
+            if not sel:
+                return
+            value = self.values[sel[0]]
+            try:
+                self.variable.set(value)
+            except Exception:
+                self.variable.set(str(value))
+            self._refresh_text()
+            self._fire("<<ComboboxSelected>>")
+            popup.destroy()
+            self._popup = None
+
+        lb.bind("<ButtonRelease-1>", choose)
+        lb.bind("<Return>", choose)
+        popup.bind("<Escape>", lambda _e: popup.destroy())
+        popup.bind("<FocusOut>", lambda _e: popup.after(150, lambda: popup.destroy() if popup.winfo_exists() else None))
+
+        self.update_idletasks()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height()
+        w = max(self.winfo_width(), 180)
+        row_h = 26
+        h = min(max(len(self.values), 1), 8) * row_h + 4
+        popup.geometry(f"{w}x{h}+{x}+{y}")
+        popup.lift()
+        popup.focus_force()
+        lb.focus_set()
+
+    def configure(self, cnf=None, **kw):
+        if cnf:
+            kw.update(cnf)
+        if "state" in kw:
+            self._state = kw.pop("state")
+        if "values" in kw:
+            self.values = list(kw.pop("values"))
+        return super().configure(**kw)
+
+    config = configure
+
+
+class DarkCheckbox(tk.Frame):
+    """自绘复选框，避免 macOS 原生 Checkbutton 背景变白。"""
+
+    def __init__(self, parent, text, variable, command=None, bg=CARD_BG, fg=TEXT):
+        super().__init__(parent, bg=bg)
+        self.variable = variable
+        self.command = command
+        self.bg = bg
+        self.fg = fg
+        self.box = tk.Label(self, text="", width=2, bg="#0B1220", fg=ACCENT, font=("Microsoft YaHei UI", 9, "bold"), relief=tk.FLAT, highlightthickness=1, highlightbackground="#64748B")
+        self.box.pack(side=tk.LEFT, padx=(0, 8))
+        self.text = tk.Label(self, text=text, bg=bg, fg=fg, font=("Microsoft YaHei UI", 9), anchor="w")
+        self.text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        for w in (self, self.box, self.text):
+            w.bind("<Button-1>", self._toggle)
+            w.configure(cursor="hand2")
+        try:
+            self.variable.trace_add("write", lambda *_: self._refresh())
+        except Exception:
+            pass
+        self._refresh()
+
+    def _refresh(self):
+        checked = bool(self.variable.get())
+        self.box.configure(text="✓" if checked else "", bg="#0B1220" if checked else "#111827")
+
+    def _toggle(self, _event=None):
+        self.variable.set(not bool(self.variable.get()))
+        self._refresh()
+        if self.command:
+            self.command()
+
+
+class TinyProgress(tk.Frame):
+    """自绘进度条，替代 ttk.Progressbar，避免 macOS 原生控件发白。"""
+
+    def __init__(self, parent, bg=PANEL_BG, trough="#243044", fill=ACCENT, height=14):
+        super().__init__(parent, bg=bg)
+        self.canvas = tk.Canvas(self, height=height, bg=trough, highlightthickness=1, highlightbackground="#64748B", bd=0)
+        self.canvas.pack(fill=tk.X, expand=True)
+        self.trough = trough
+        self.fill = fill
+        self._running = False
+        self._pos = 0
+        self._after = None
+
+    def start(self, interval=20):
+        self._running = True
+        self._animate(max(10, int(interval)))
+
+    def stop(self):
+        self._running = False
+        if self._after:
+            try:
+                self.after_cancel(self._after)
+            except Exception:
+                pass
+            self._after = None
+        self.canvas.delete("bar")
+
+    def _animate(self, interval):
+        if not self._running:
+            return
+        self.canvas.delete("bar")
+        w = max(1, self.canvas.winfo_width())
+        h = max(1, self.canvas.winfo_height())
+        bar_w = max(28, int(w * 0.18))
+        x = self._pos % (w + bar_w) - bar_w
+        self.canvas.create_rectangle(x, 2, x + bar_w, h - 2, fill=self.fill, width=0, tags="bar")
+        self._pos += max(4, w // 60)
+        self._after = self.after(interval, lambda: self._animate(interval))
 
 
 # =========================
@@ -632,6 +980,14 @@ class DisplayConverterApp:
         # FFmpeg 官方下载页会按 Windows / macOS / Linux 提供对应入口。
         return "https://ffmpeg.org/download.html"
 
+    def ffmpeg_display_text(self):
+        if not self.ffmpeg_path:
+            return "FFmpeg：未找到"
+        # 客户版不显示 /private/var/folders/.../_MEIxxxx 这种临时路径，避免误导。
+        if is_frozen_app():
+            return "FFmpeg：内置版本已就绪"
+        return f"FFmpeg：{self.ffmpeg_path}"
+
     def open_ffmpeg_download_page(self):
         webbrowser.open(self.ffmpeg_download_url())
 
@@ -685,22 +1041,13 @@ class DisplayConverterApp:
         return self.label(parent, text, size=12, weight="bold")
 
     def make_button(self, parent, text, command, bg="#273449", fg=TEXT, active=None):
-        btn = tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=bg,
-            fg=fg,
-            activebackground=active or bg,
-            activeforeground=fg,
-            relief=tk.FLAT,
-            bd=0,
-            padx=12,
-            pady=8,
-            cursor="hand2",
-            font=("Microsoft YaHei UI", 9, "bold"),
-        )
-        return btn
+        return FlatButton(parent, text=text, command=command, bg=bg, fg=fg, active=active)
+
+    def make_dropdown(self, parent, textvariable, values, bg=CARD_BG):
+        return DarkDropdown(parent, textvariable=textvariable, values=values, bg=bg)
+
+    def make_checkbox(self, parent, text, variable, command=None, bg=CARD_BG, fg=TEXT):
+        return DarkCheckbox(parent, text=text, variable=variable, command=command, bg=bg, fg=fg)
 
     def create_scrollable_panel(self, parent, width=380, bg=PANEL_BG):
         """创建带纵向滚动条的左侧参数面板。窗口变小后，按钮不会被挤没。"""
@@ -841,7 +1188,7 @@ class DisplayConverterApp:
 
         chip = tk.Frame(left, bg="#0B1220", highlightthickness=1, highlightbackground="#243044")
         chip.pack(fill=tk.X, padx=18, pady=(0, 12))
-        ffmpeg_text = f"FFmpeg：{self.ffmpeg_path}" if self.ffmpeg_path else "FFmpeg：未找到"
+        ffmpeg_text = self.ffmpeg_display_text()
         self.label(chip, ffmpeg_text, size=8, fg=SUCCESS if self.ffmpeg_path else DANGER, bg="#0B1220", wraplength=315, justify=tk.LEFT).pack(anchor="w", padx=10, pady=(8, 4))
         if not self.ffmpeg_path:
             self.label(chip, self.ffmpeg_install_hint(), size=8, fg=MUTED, bg="#0B1220", wraplength=315, justify=tk.LEFT).pack(anchor="w", padx=10, pady=(0, 8))
@@ -849,22 +1196,20 @@ class DisplayConverterApp:
                 self.make_button(chip, "打开 FFmpeg 下载/安装页面", self.open_ffmpeg_download_page, bg="#334155").pack(anchor="w", padx=10, pady=(0, 10))
 
         self.lcd_size_box = self.control_card(left, "输出尺寸", "屏幕分辨率用冒号格式，例如 240:320")
-        self.lcd_size_combo = ttk.Combobox(
+        self.lcd_size_combo = self.make_dropdown(
             self.lcd_size_box,
             textvariable=self.lcd_output_size,
             values=["240:320", "320:240", "480:800", "640:480", "1280:720", "自定义"],
-            state="readonly",
         )
         self.lcd_size_combo.pack(fill=tk.X, padx=12, pady=(0, 8))
         self.lcd_size_combo.bind("<<ComboboxSelected>>", self.on_lcd_size_selected)
         self.lcd_custom_size_entry = tk.Entry(self.lcd_size_box, bg="#F8FAFC", relief=tk.FLAT)
 
         fmt_box = self.control_card(left, "输出格式", ".mjpeg 是裸流，更适合嵌入式；其他是容器格式。")
-        ttk.Combobox(
+        self.make_dropdown(
             fmt_box,
             textvariable=self.lcd_output_format,
             values=[".mjpeg", ".avi", ".mkv", ".mov", ".mp4"],
-            state="readonly",
         ).pack(fill=tk.X, padx=12, pady=(0, 8))
 
         q_box = self.control_card(left, "JPEG 质量", "2-31，数字越小越清晰，文件也更大。")
@@ -872,15 +1217,12 @@ class DisplayConverterApp:
                  highlightthickness=0, troughcolor="#334155", activebackground=ACCENT).pack(fill=tk.X, padx=10, pady=(0, 8))
 
         name_box = self.control_card(left, "命名", "保留原功能：可在输出文件名后追加尺寸。")
-        tk.Checkbutton(
+        self.make_checkbox(
             name_box,
             text="追加尺寸信息，例如 _mjpeg_240x320",
             variable=self.lcd_add_size_suffix,
             bg=CARD_BG,
             fg=TEXT,
-            activebackground=CARD_BG,
-            activeforeground=TEXT,
-            selectcolor="#0B1220",
         ).pack(anchor="w", padx=10, pady=(0, 10))
 
         btn_row = tk.Frame(left, bg=PANEL_BG)
@@ -891,7 +1233,7 @@ class DisplayConverterApp:
 
         self.lcd_convert_btn = self.make_button(left, "开始批量转换", self.lcd_start_conversion, bg=SUCCESS, fg="#052E16")
         self.lcd_convert_btn.pack(fill=tk.X, padx=18, pady=(4, 12))
-        self.lcd_progress = ttk.Progressbar(left, mode="indeterminate")
+        self.lcd_progress = TinyProgress(left, bg=PANEL_BG)
         self.lcd_progress.pack(fill=tk.X, padx=18, pady=(0, 16))
 
         # 右侧列表与说明
@@ -1099,28 +1441,25 @@ class DisplayConverterApp:
         self.make_button(row, "选择文件夹", self.epaper_select_folder, bg="#334155").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
 
         preset_box = self.control_card(left, "屏幕预设", "包含尺寸、bpp、调色板、打包顺序。")
-        ttk.Combobox(preset_box, textvariable=self.epaper_preset_var, values=list(EPAPER_PRESETS.keys()), state="readonly").pack(fill=tk.X, padx=12, pady=(0, 8))
+        self.make_dropdown(preset_box, textvariable=self.epaper_preset_var, values=list(EPAPER_PRESETS.keys())).pack(fill=tk.X, padx=12, pady=(0, 8))
         self.epaper_preset_var.trace_add("write", lambda *_: self.epaper_rebuild_previews())
         self.epaper_note_label = self.label(preset_box, EPAPER_PRESETS[self.epaper_preset_var.get()].get("note", ""), size=8, fg=MUTED, bg=CARD_BG, wraplength=320, justify=tk.LEFT)
         self.epaper_note_label.pack(anchor="w", padx=12, pady=(0, 10))
 
         fit_box = self.control_card(left, "画面适配", "裁剪填满适合屏幕展示；留白适合完整保留图。")
-        ttk.Combobox(fit_box, textvariable=self.epaper_fit_var, values=["裁剪填满", "完整适配留白", "拉伸"], state="readonly").pack(fill=tk.X, padx=12, pady=(0, 8))
+        self.make_dropdown(fit_box, textvariable=self.epaper_fit_var, values=["裁剪填满", "完整适配留白", "拉伸"]).pack(fill=tk.X, padx=12, pady=(0, 8))
         self.epaper_fit_var.trace_add("write", lambda *_: self.epaper_rebuild_previews())
-        ttk.Combobox(fit_box, textvariable=self.epaper_rotate_var, values=[0, 90, 180, 270], state="readonly").pack(fill=tk.X, padx=12, pady=(0, 10))
+        self.make_dropdown(fit_box, textvariable=self.epaper_rotate_var, values=[0, 90, 180, 270]).pack(fill=tk.X, padx=12, pady=(0, 10))
         self.epaper_rotate_var.trace_add("write", lambda *_: self.epaper_rebuild_previews())
 
         dither_box = self.control_card(left, "量化与抖动", "四色屏建议开启抖动，纯图标/文字可以关闭。")
-        tk.Checkbutton(
+        self.make_checkbox(
             dither_box,
             text="启用 Floyd-Steinberg 抖动",
             variable=self.epaper_dither_var,
             command=self.epaper_rebuild_previews,
             bg=CARD_BG,
             fg=TEXT,
-            activebackground=CARD_BG,
-            activeforeground=TEXT,
-            selectcolor="#0B1220",
         ).pack(anchor="w", padx=10, pady=(0, 10))
 
         sliders = self.control_card(left, "全局图像调节", "修改后会重新生成预览。")
@@ -1204,7 +1543,21 @@ class DisplayConverterApp:
         self.label(row, name, size=8, fg=MUTED, bg=CARD_BG).pack(anchor="w")
         line = tk.Frame(row, bg=CARD_BG)
         line.pack(fill=tk.X)
-        scale = ttk.Scale(line, from_=a, to=b, variable=var, command=lambda _v: self.epaper_rebuild_previews_delayed())
+        scale = tk.Scale(
+            line,
+            from_=a,
+            to=b,
+            resolution=0.01,
+            orient=tk.HORIZONTAL,
+            variable=var,
+            command=lambda _v: self.epaper_rebuild_previews_delayed(),
+            bg=CARD_BG,
+            fg=TEXT,
+            troughcolor="#334155",
+            activebackground=ACCENT,
+            highlightthickness=0,
+            showvalue=False,
+        )
         scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
         value_label = self.label(line, "", size=8, fg=MUTED, bg=CARD_BG, width=5)
         value_label.pack(side=tk.RIGHT, padx=(8, 0))
