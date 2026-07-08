@@ -1,10 +1,8 @@
-name: Build Windows and macOS Apps
+name: Build Artifex Display Converter
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
     tags:
       - "v*"
 
@@ -58,6 +56,12 @@ jobs:
           print("processor:", platform.processor())
           print("bits:", struct.calcsize("P") * 8)
           PY
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            echo "uname -m:"
+            uname -m
+            echo "sw_vers:"
+            sw_vers
+          fi
 
       - name: Install Python dependencies
         shell: bash
@@ -101,20 +105,19 @@ jobs:
         shell: bash
         run: |
           echo "=== dist tree ==="
-          find dist -maxdepth 8 -print || true
-
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            echo "=== Windows dist folder ==="
-            ls -la "dist/ArtifexDisplayConverter" || true
-          fi
+          find dist -maxdepth 6 -print || true
 
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             echo "=== macOS app executable info ==="
-            file "dist/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter" || true
-
+            file "dist/ArtifexDisplayConverter.app/Contents/MacOS/ArtifexDisplayConverter"
             echo "=== macOS bundled ffmpeg info ==="
-            ls -la "dist/ArtifexDisplayConverter.app/Contents/Resources/" || true
             file "dist/ArtifexDisplayConverter.app/Contents/Resources/ffmpeg" || true
+            ls -l "dist/ArtifexDisplayConverter.app/Contents/Resources/" || true
+          fi
+
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            echo "=== Windows app folder ==="
+            ls -la "dist/ArtifexDisplayConverter" || true
           fi
 
       - name: Smoke test packaged app
@@ -130,15 +133,8 @@ jobs:
 
           echo "BIN=$BIN"
 
-          if [[ ! -f "$BIN" ]]; then
-            echo "ERROR: packaged app not found: $BIN"
-            echo "=== dist tree for debug ==="
-            find dist -maxdepth 8 -print || true
-            exit 1
-          fi
-
-          if [[ "$RUNNER_OS" != "Windows" ]]; then
-            chmod +x "$BIN"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            file "$BIN"
           fi
 
           echo "=== self test ==="
@@ -164,13 +160,6 @@ jobs:
           ZIP="release/${PACKAGE_NAME}.zip"
           echo "Testing zip: $ZIP"
 
-          if [[ ! -f "$ZIP" ]]; then
-            echo "ERROR: zip not found: $ZIP"
-            echo "=== release tree ==="
-            find release -maxdepth 4 -print || true
-            exit 1
-          fi
-
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             ditto -x -k "$ZIP" extracted
           else
@@ -183,7 +172,7 @@ jobs:
           fi
 
           echo "=== extracted tree ==="
-          find extracted -maxdepth 8 -print || true
+          find extracted -maxdepth 6 -print || true
 
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             BIN="extracted/ArtifexDisplayConverter/ArtifexDisplayConverter.exe"
@@ -195,20 +184,14 @@ jobs:
 
           echo "BIN=$BIN"
 
-          if [[ ! -f "$BIN" ]]; then
-            echo "ERROR: extracted app not found: $BIN"
-            echo "=== extracted tree for debug ==="
-            find extracted -maxdepth 8 -print || true
-            exit 1
-          fi
-
           if [[ "$RUNNER_OS" != "Windows" ]]; then
             chmod +x "$BIN"
           fi
 
           if [[ "$RUNNER_OS" == "macOS" ]]; then
+            file "$BIN"
             echo "=== extracted macOS Resources ==="
-            ls -la "extracted/ArtifexDisplayConverter.app/Contents/Resources/" || true
+            ls -l "extracted/ArtifexDisplayConverter.app/Contents/Resources/" || true
             file "extracted/ArtifexDisplayConverter.app/Contents/Resources/ffmpeg" || true
           fi
 
